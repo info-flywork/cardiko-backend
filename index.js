@@ -13,6 +13,7 @@ const publicCardsRoutes = require('./routes/publicCards');
 const publicSharesRoutes = require('./routes/publicShares');
 const webhooksRoutes = require('./routes/webhooks');
 const { uploadsDir } = require('./controller/uploadsController');
+const { initDatabase } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -70,6 +71,18 @@ app.use('/ai', aiRoutes);
 app.use('/webhooks', webhooksRoutes);
 app.use('/uploads', express.static(uploadsDir));
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+async function start() {
+  try {
+    await initDatabase();
+    console.log('[db] MySQL bağlandı, tablolar hazır');
+  } catch (err) {
+    console.error('[db] Bağlantı / migrate hatası:', err.message);
+    process.exit(1);
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+start();

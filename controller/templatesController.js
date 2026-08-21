@@ -118,9 +118,9 @@ function getCategory(req, res) {
   }
 }
 
-function unlocked(req, res) {
+async function unlocked(req, res) {
   try {
-    const ids = listUnlockedTemplateIds(req.user.id);
+    const ids = await listUnlockedTemplateIds(req.user.id);
     return res.json({ unlocked: ids });
   } catch (err) {
     console.error('[templates unlocked]', err);
@@ -128,7 +128,7 @@ function unlocked(req, res) {
   }
 }
 
-function unlock(req, res) {
+async function unlock(req, res) {
   const templateId =
     typeof req.body?.templateId === 'string'
       ? req.body.templateId
@@ -137,7 +137,7 @@ function unlock(req, res) {
         : '';
 
   try {
-    const result = unlockTemplate(req.user.id, templateId);
+    const result = await unlockTemplate(req.user.id, templateId);
     if (!result.ok && result.code === 'INSUFFICIENT') {
       return res.status(402).json({
         message: 'Not enough tokens',

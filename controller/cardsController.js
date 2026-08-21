@@ -2,15 +2,16 @@ const { randomUUID } = require('crypto');
 const {
   listCardsByUser,
   findCardForUser,
+  upsertCard,
   upsertCardWithCreationSpend,
   deleteCard,
   setPrimaryCard,
   CARD_CREATION_COST,
 } = require('../db');
 
-function list(req, res) {
+async function list(req, res) {
   try {
-    const cards = listCardsByUser(req.user.id);
+    const cards = await listCardsByUser(req.user.id);
     return res.status(200).json({ cards });
   } catch (err) {
     console.error('[cards GET]', err);
@@ -18,9 +19,9 @@ function list(req, res) {
   }
 }
 
-function getOne(req, res) {
+async function getOne(req, res) {
   try {
-    const card = findCardForUser(req.params.id, req.user.id);
+    const card = await findCardForUser(req.params.id, req.user.id);
     if (!card) {
       return res.status(404).json({ message: 'Card not found' });
     }
@@ -31,7 +32,7 @@ function getOne(req, res) {
   }
 }
 
-function create(req, res) {
+async function create(req, res) {
   try {
     const body = req.body || {};
     const data =
@@ -48,7 +49,7 @@ function create(req, res) {
     const payload = { ...data, creationId: id };
     const isPrimary = body.isPrimary !== false;
 
-    const result = upsertCardWithCreationSpend({
+    const result = await upsertCardWithCreationSpend({
       id,
       userId: req.user.id,
       data: payload,
@@ -75,19 +76,19 @@ function create(req, res) {
   }
 }
 
-function update(req, res) {
+async function update(req, res) {
   try {
     const body = req.body || {};
     const data =
       body.data && typeof body.data === 'object' ? body.data : body;
-    const existing = findCardForUser(req.params.id, req.user.id);
+    const existing = await findCardForUser(req.params.id, req.user.id);
     const payload = {
       ...(existing?.data || {}),
       ...data,
       creationId: req.params.id,
     };
 
-    const card = upsertCard({
+    const card = await upsertCard({
       id: req.params.id,
       userId: req.user.id,
       data: payload,
@@ -102,9 +103,9 @@ function update(req, res) {
   }
 }
 
-function remove(req, res) {
+async function remove(req, res) {
   try {
-    const ok = deleteCard(req.params.id, req.user.id);
+    const ok = await deleteCard(req.params.id, req.user.id);
     if (!ok) {
       return res.status(404).json({ message: 'Card not found' });
     }
@@ -115,9 +116,9 @@ function remove(req, res) {
   }
 }
 
-function makePrimary(req, res) {
+async function makePrimary(req, res) {
   try {
-    const card = setPrimaryCard(req.params.id, req.user.id);
+    const card = await setPrimaryCard(req.params.id, req.user.id);
     if (!card) {
       return res.status(404).json({ message: 'Card not found' });
     }
@@ -128,9 +129,9 @@ function makePrimary(req, res) {
   }
 }
 
-function like(req, res) {
+async function like(req, res) {
   try {
-    const existing = findCardForUser(req.params.id, req.user.id);
+    const existing = await findCardForUser(req.params.id, req.user.id);
     if (!existing) {
       return res.status(404).json({ message: 'Card not found' });
     }
@@ -140,7 +141,7 @@ function like(req, res) {
       liked,
       creationId: req.params.id,
     };
-    const card = upsertCard({
+    const card = await upsertCard({
       id: req.params.id,
       userId: req.user.id,
       data: payload,
@@ -152,9 +153,9 @@ function like(req, res) {
   }
 }
 
-function recordExport(req, res) {
+async function recordExport(req, res) {
   try {
-    const existing = findCardForUser(req.params.id, req.user.id);
+    const existing = await findCardForUser(req.params.id, req.user.id);
     if (!existing) {
       return res.status(404).json({ message: 'Card not found' });
     }
@@ -168,7 +169,7 @@ function recordExport(req, res) {
       downloadCount: prev + 1,
       lastDownloadedAt: new Date().toISOString(),
     };
-    const card = upsertCard({
+    const card = await upsertCard({
       id: req.params.id,
       userId: req.user.id,
       data: payload,
@@ -180,9 +181,9 @@ function recordExport(req, res) {
   }
 }
 
-function setDesign(req, res) {
+async function setDesign(req, res) {
   try {
-    const existing = findCardForUser(req.params.id, req.user.id);
+    const existing = await findCardForUser(req.params.id, req.user.id);
     if (!existing) {
       return res.status(404).json({ message: 'Card not found' });
     }
@@ -193,7 +194,7 @@ function setDesign(req, res) {
       creationId: req.params.id,
       designIndex,
     };
-    const card = upsertCard({
+    const card = await upsertCard({
       id: req.params.id,
       userId: req.user.id,
       data: payload,
@@ -205,9 +206,9 @@ function setDesign(req, res) {
   }
 }
 
-function setColor(req, res) {
+async function setColor(req, res) {
   try {
-    const existing = findCardForUser(req.params.id, req.user.id);
+    const existing = await findCardForUser(req.params.id, req.user.id);
     if (!existing) {
       return res.status(404).json({ message: 'Card not found' });
     }
@@ -226,7 +227,7 @@ function setColor(req, res) {
       customColorValue,
       hasCustomColor,
     };
-    const card = upsertCard({
+    const card = await upsertCard({
       id: req.params.id,
       userId: req.user.id,
       data: payload,

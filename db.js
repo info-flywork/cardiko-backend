@@ -1,132 +1,191 @@
-const fs = require('fs');
-const path = require('path');
-const Database = require('better-sqlite3');
+const mysql = require('mysql2/promise');
 
-const dataDir = path.join(__dirname, 'data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || '127.0.0.1',
+  port: Number(process.env.DB_PORT || 3306),
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  waitForConnections: true,
+  connectionLimit: Number(process.env.DB_POOL_SIZE || 10),
+  namedPlaceholders: false,
+  timezone: 'Z',
+});
+
+async function q(sql, params = [], conn = pool) {
+  const [rows] = await conn.execute(sql, params);
+  return rows;
 }
 
-const db = new Database(path.join(dataDir, 'cardiko.db'));
-db.pragma('journal_mode = WAL');
+async function qOne(sql, params = [], conn = pool) {
+  const rows = await q(sql, params, conn);
+  return rows[0] || null;
+}
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    device_id TEXT NOT NULL UNIQUE,
-    display_name TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+async function qRun(sql, params = [], conn = pool) {
+  const [result] = await conn.execute(sql, params);
+  return {
+    changes: result.affectedRows || 0,
+    insertId: result.insertId,
+  };
+}
+
+async function withTx(fn) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const result = await fn(conn);
+    await conn.commit();
+    return result;
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
+async function initDatabase() {
+  if (!process.env.DB_USER || !process.env.DB_NAME) {
+    throw new Error('DB_USER and DB_NAME must be set in .env');
+  }
+
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS users (
+      id VARCHAR(64) PRIMARY KEY,
+      device_id VARCHAR(191) NOT NULL UNIQUE,
+      display_name VARCHAR(255) NOT NULL,
+      avatar_url TEXT NULL,
+      created_at VARCHAR(40) NOT NULL,
+      updated_at VARCHAR(40) NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS cards (
+      id VARCHAR(64) PRIMARY KEY,
+      user_id VARCHAR(64) NOT NULL,
+      payload MEDIUMTEXT NOT NULL,
+      is_primary TINYINT NOT NULL DEFAULT 0,
+      created_at VARCHAR(40) NOT NULL,
+      updated_at VARCHAR(40) NOT NULL,
+      INDEX idx_cards_user (user_id),
+      CONSTRAINT fk_cards_user FOREIGN KEY (user_id) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS user_tokens (
+      user_id VARCHAR(64) PRIMARY KEY,
+      balance INT NOT NULL DEFAULT 12,
+      updated_at VARCHAR(40) NOT NULL,
+      CONSTRAINT fk_tokens_user FOREIGN KEY (user_id) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS user_template_unlocks (
+      user_id VARCHAR(64) NOT NULL,
+      template_id VARCHAR(128) NOT NULL,
+      unlocked_at VARCHAR(40) NOT NULL,
+      PRIMARY KEY (user_id, template_id),
+      CONSTRAINT fk_unlocks_user FOREIGN KEY (user_id) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS user_preferences (
+      user_id VARCHAR(64) PRIMARY KEY,
+      notifications_enabled TINYINT NOT NULL DEFAULT 0,
+      language_code VARCHAR(16) NOT NULL DEFAULT 'tr',
+      premium_active TINYINT NOT NULL DEFAULT 0,
+      onboarding_completed TINYINT NOT NULL DEFAULT 0,
+      card_style VARCHAR(64) NULL,
+      updated_at VARCHAR(40) NOT NULL,
+      CONSTRAINT fk_prefs_user FOREIGN KEY (user_id) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS user_invites (
+      user_id VARCHAR(64) PRIMARY KEY,
+      code VARCHAR(32) NOT NULL UNIQUE,
+      created_at VARCHAR(40) NOT NULL,
+      INDEX idx_user_invites_code (code),
+      CONSTRAINT fk_invites_user FOREIGN KEY (user_id) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS invite_redemptions (
+      redeemer_id VARCHAR(64) PRIMARY KEY,
+      code VARCHAR(32) NOT NULL,
+      inviter_id VARCHAR(64) NULL,
+      created_at VARCHAR(40) NOT NULL,
+      CONSTRAINT fk_redemptions_user FOREIGN KEY (redeemer_id) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS device_push_tokens (
+      token VARCHAR(512) PRIMARY KEY,
+      user_id VARCHAR(64) NOT NULL,
+      platform VARCHAR(32) NOT NULL DEFAULT 'unknown',
+      created_at VARCHAR(40) NOT NULL,
+      updated_at VARCHAR(40) NOT NULL,
+      INDEX idx_device_tokens_user (user_id),
+      CONSTRAINT fk_devices_user FOREIGN KEY (user_id) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS user_notifications (
+      id VARCHAR(64) PRIMARY KEY,
+      user_id VARCHAR(64) NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      body TEXT NOT NULL,
+      data TEXT NOT NULL,
+      read_at VARCHAR(40) NULL,
+      created_at VARCHAR(40) NOT NULL,
+      INDEX idx_user_notifications_user (user_id, created_at),
+      CONSTRAINT fk_notifications_user FOREIGN KEY (user_id) REFERENCES users(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS account_deletion_feedback (
+      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      user_id VARCHAR(64) NULL,
+      reason VARCHAR(255) NULL,
+      note TEXT NULL,
+      deleted_at VARCHAR(40) NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS revenuecat_webhook_events (
+      event_id VARCHAR(191) PRIMARY KEY,
+      created_at VARCHAR(40) NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS ai_chats (
+      id VARCHAR(64) PRIMARY KEY,
+      user_id VARCHAR(64) NOT NULL,
+      title VARCHAR(255) NOT NULL DEFAULT '',
+      thumbnail_asset VARCHAR(255) NULL,
+      messages MEDIUMTEXT NOT NULL,
+      share_token VARCHAR(64) NULL UNIQUE,
+      created_at VARCHAR(40) NOT NULL,
+      updated_at VARCHAR(40) NOT NULL,
+      INDEX idx_ai_chats_user (user_id),
+      INDEX idx_ai_chats_share (share_token),
+      CONSTRAINT fk_ai_chats_user FOREIGN KEY (user_id) REFERENCES users(id)
+    )`,
+  ];
+
+  for (const sql of statements) {
+    await pool.query(sql);
+  }
+
+  await ensureColumn('users', 'avatar_url', 'TEXT NULL');
+  await ensureColumn(
+    'user_preferences',
+    'language_code',
+    `VARCHAR(16) NOT NULL DEFAULT 'tr'`
   );
-
-  CREATE TABLE IF NOT EXISTS cards (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    payload TEXT NOT NULL,
-    is_primary INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id)
+  await ensureColumn(
+    'user_preferences',
+    'premium_active',
+    'TINYINT NOT NULL DEFAULT 0'
   );
-
-  CREATE INDEX IF NOT EXISTS idx_cards_user ON cards(user_id);
-
-  CREATE TABLE IF NOT EXISTS user_tokens (
-    user_id TEXT PRIMARY KEY,
-    balance INTEGER NOT NULL DEFAULT 12,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id)
+  await ensureColumn(
+    'user_preferences',
+    'onboarding_completed',
+    'TINYINT NOT NULL DEFAULT 0'
   );
+  await ensureColumn('user_preferences', 'card_style', 'VARCHAR(64) NULL');
+}
 
-  CREATE TABLE IF NOT EXISTS user_template_unlocks (
-    user_id TEXT NOT NULL,
-    template_id TEXT NOT NULL,
-    unlocked_at TEXT NOT NULL,
-    PRIMARY KEY (user_id, template_id),
-    FOREIGN KEY (user_id) REFERENCES users(id)
+async function ensureColumn(table, column, definition) {
+  const dbName = process.env.DB_NAME;
+  const rows = await q(
+    `SELECT COUNT(*) AS c
+     FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+    [dbName, table, column]
   );
-
-  CREATE TABLE IF NOT EXISTS user_preferences (
-    user_id TEXT PRIMARY KEY,
-    notifications_enabled INTEGER NOT NULL DEFAULT 0,
-    language_code TEXT NOT NULL DEFAULT 'tr',
-    premium_active INTEGER NOT NULL DEFAULT 0,
-    onboarding_completed INTEGER NOT NULL DEFAULT 0,
-    card_style TEXT,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS user_invites (
-    user_id TEXT PRIMARY KEY,
-    code TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS invite_redemptions (
-    redeemer_id TEXT PRIMARY KEY,
-    code TEXT NOT NULL,
-    inviter_id TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (redeemer_id) REFERENCES users(id)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_user_invites_code ON user_invites(code);
-
-  CREATE TABLE IF NOT EXISTS device_push_tokens (
-    token TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    platform TEXT NOT NULL DEFAULT 'unknown',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_push_tokens(user_id);
-
-  CREATE TABLE IF NOT EXISTS user_notifications (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    body TEXT NOT NULL DEFAULT '',
-    data TEXT NOT NULL DEFAULT '{}',
-    read_at TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_user_notifications_user
-    ON user_notifications(user_id, created_at DESC);
-
-  CREATE TABLE IF NOT EXISTS account_deletion_feedback (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT,
-    reason TEXT,
-    note TEXT,
-    deleted_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS revenuecat_webhook_events (
-    event_id TEXT PRIMARY KEY,
-    created_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS ai_chats (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    title TEXT NOT NULL DEFAULT '',
-    thumbnail_asset TEXT,
-    messages TEXT NOT NULL DEFAULT '[]',
-    share_token TEXT UNIQUE,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_ai_chats_user ON ai_chats(user_id);
-  CREATE INDEX IF NOT EXISTS idx_ai_chats_share ON ai_chats(share_token);
-`);
+  if ((rows[0]?.c || 0) > 0) return;
+  await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+}
 
 const INITIAL_TOKEN_BALANCE = 0;
 /// Şablon kilidi token bedeli — henüz net değil, tek yerden değişir.
@@ -157,39 +216,6 @@ const SUPPORTED_CARD_STYLES = new Set([
   'onyx',
 ]);
 
-// Mevcut DB'ler için kolon ekle
-try {
-  db.exec(`ALTER TABLE users ADD COLUMN avatar_url TEXT`);
-} catch {
-  // kolon zaten var
-}
-try {
-  db.exec(
-    `ALTER TABLE user_preferences ADD COLUMN language_code TEXT NOT NULL DEFAULT 'tr'`
-  );
-} catch {
-  // kolon zaten var
-}
-try {
-  db.exec(
-    `ALTER TABLE user_preferences ADD COLUMN premium_active INTEGER NOT NULL DEFAULT 0`
-  );
-} catch {
-  // kolon zaten var
-}
-try {
-  db.exec(
-    `ALTER TABLE user_preferences ADD COLUMN onboarding_completed INTEGER NOT NULL DEFAULT 0`
-  );
-} catch {
-  // kolon zaten var
-}
-try {
-  db.exec(`ALTER TABLE user_preferences ADD COLUMN card_style TEXT`);
-} catch {
-  // kolon zaten var
-}
-
 function rowToUser(row) {
   if (!row) return null;
   return {
@@ -202,146 +228,163 @@ function rowToUser(row) {
   };
 }
 
-function findUserByDeviceId(deviceId) {
-  const row = db
-    .prepare('SELECT * FROM users WHERE device_id = ?')
-    .get(deviceId);
+async function findUserByDeviceId(deviceId, conn = pool) {
+  const row = await qOne(
+    'SELECT * FROM users WHERE device_id = ?',
+    [deviceId],
+    conn
+  );
   return rowToUser(row);
 }
 
-function findUserById(id) {
-  const row = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+async function findUserById(id, conn = pool) {
+  const row = await qOne('SELECT * FROM users WHERE id = ?', [id], conn);
   return rowToUser(row);
 }
 
-function createUser({ id, deviceId, displayName }) {
+async function createUser({ id, deviceId, displayName }) {
   const now = new Date().toISOString();
-  db.prepare(
+  await qRun(
     `INSERT INTO users (id, device_id, display_name, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(id, deviceId, displayName, now, now);
-  ensureUserTokens(id);
+     VALUES (?, ?, ?, ?, ?)`,
+    [id, deviceId, displayName, now, now]
+  );
+  await ensureUserTokens(id);
   return findUserById(id);
 }
 
-function ensureUserTokens(userId) {
-  const existing = db
-    .prepare('SELECT user_id FROM user_tokens WHERE user_id = ?')
-    .get(userId);
+async function ensureUserTokens(userId, conn = pool) {
+  const existing = await qOne(
+    'SELECT user_id FROM user_tokens WHERE user_id = ?',
+    [userId],
+    conn
+  );
   if (existing) return;
   const now = new Date().toISOString();
-  db.prepare(
-    `INSERT INTO user_tokens (user_id, balance, updated_at) VALUES (?, ?, ?)`
-  ).run(userId, INITIAL_TOKEN_BALANCE, now);
+  await qRun(
+    `INSERT INTO user_tokens (user_id, balance, updated_at) VALUES (?, ?, ?)`,
+    [userId, INITIAL_TOKEN_BALANCE, now],
+    conn
+  );
 }
 
-function getTokenBalance(userId) {
-  ensureUserTokens(userId);
-  const row = db
-    .prepare('SELECT balance FROM user_tokens WHERE user_id = ?')
-    .get(userId);
+async function getTokenBalance(userId, conn = pool) {
+  await ensureUserTokens(userId, conn);
+  const row = await qOne(
+    'SELECT balance FROM user_tokens WHERE user_id = ?',
+    [userId],
+    conn
+  );
   return row?.balance ?? INITIAL_TOKEN_BALANCE;
 }
 
-function listUnlockedTemplateIds(userId) {
-  const rows = db
-    .prepare(
-      `SELECT template_id FROM user_template_unlocks WHERE user_id = ? ORDER BY unlocked_at ASC`
-    )
-    .all(userId);
+async function listUnlockedTemplateIds(userId, conn = pool) {
+  const rows = await q(
+    `SELECT template_id FROM user_template_unlocks WHERE user_id = ? ORDER BY unlocked_at ASC`,
+    [userId],
+    conn
+  );
   return rows.map((r) => r.template_id);
 }
 
-function getTokensState(userId) {
+async function getTokensState(userId, conn = pool) {
   return {
-    balance: getTokenBalance(userId),
-    unlockedTemplateIds: listUnlockedTemplateIds(userId),
+    balance: await getTokenBalance(userId, conn),
+    unlockedTemplateIds: await listUnlockedTemplateIds(userId, conn),
     unlockCost: TEMPLATE_UNLOCK_COST,
     cardCreationCost: CARD_CREATION_COST,
   };
 }
 
-function creditTokens(userId, amount) {
+async function creditTokens(userId, amount, conn = pool) {
   if (!Number.isFinite(amount) || amount <= 0) {
-    return getTokensState(userId);
+    return getTokensState(userId, conn);
   }
-  ensureUserTokens(userId);
+  await ensureUserTokens(userId, conn);
   const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE user_tokens SET balance = balance + ?, updated_at = ? WHERE user_id = ?`
-  ).run(Math.floor(amount), now, userId);
-  return getTokensState(userId);
+  await qRun(
+    `UPDATE user_tokens SET balance = balance + ?, updated_at = ? WHERE user_id = ?`,
+    [Math.floor(amount), now, userId],
+    conn
+  );
+  return getTokensState(userId, conn);
 }
 
 /**
  * Atomik unlock. Returns { ok, code?, state }
  */
-function unlockTemplate(userId, templateId) {
+async function unlockTemplate(userId, templateId) {
   if (!templateId || typeof templateId !== 'string') {
-    return { ok: false, code: 'INVALID_ID', state: getTokensState(userId) };
+    return { ok: false, code: 'INVALID_ID', state: await getTokensState(userId) };
   }
   const id = templateId.trim();
   if (!id) {
-    return { ok: false, code: 'INVALID_ID', state: getTokensState(userId) };
+    return { ok: false, code: 'INVALID_ID', state: await getTokensState(userId) };
   }
 
-  ensureUserTokens(userId);
+  await ensureUserTokens(userId);
 
-  const already = db
-    .prepare(
-      `SELECT 1 FROM user_template_unlocks WHERE user_id = ? AND template_id = ?`
-    )
-    .get(userId, id);
+  const already = await qOne(
+    `SELECT 1 AS ok FROM user_template_unlocks WHERE user_id = ? AND template_id = ?`,
+    [userId, id]
+  );
   if (already) {
-    return { ok: true, code: 'ALREADY', state: getTokensState(userId) };
+    return { ok: true, code: 'ALREADY', state: await getTokensState(userId) };
   }
 
-  const unlockTx = db.transaction(() => {
-    const row = db
-      .prepare('SELECT balance FROM user_tokens WHERE user_id = ?')
-      .get(userId);
+  const result = await withTx(async (conn) => {
+    const row = await qOne(
+      'SELECT balance FROM user_tokens WHERE user_id = ?',
+      [userId],
+      conn
+    );
     const balance = row?.balance ?? 0;
     if (balance < TEMPLATE_UNLOCK_COST) {
       return { ok: false, code: 'INSUFFICIENT' };
     }
     const now = new Date().toISOString();
-    db.prepare(
-      `UPDATE user_tokens SET balance = balance - ?, updated_at = ? WHERE user_id = ?`
-    ).run(TEMPLATE_UNLOCK_COST, now, userId);
-    db.prepare(
+    await qRun(
+      `UPDATE user_tokens SET balance = balance - ?, updated_at = ? WHERE user_id = ?`,
+      [TEMPLATE_UNLOCK_COST, now, userId],
+      conn
+    );
+    await qRun(
       `INSERT INTO user_template_unlocks (user_id, template_id, unlocked_at)
-       VALUES (?, ?, ?)`
-    ).run(userId, id, now);
+       VALUES (?, ?, ?)`,
+      [userId, id, now],
+      conn
+    );
     return { ok: true };
   });
 
-  const result = unlockTx();
   return {
     ok: result.ok,
     code: result.code,
-    state: getTokensState(userId),
+    state: await getTokensState(userId),
   };
 }
 
-function updateDisplayName(id, displayName) {
+async function updateDisplayName(id, displayName) {
   const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?`
-  ).run(displayName, now, id);
+  await qRun(
+    `UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?`,
+    [displayName, now, id]
+  );
   return findUserById(id);
 }
 
-function updateAvatarUrl(id, avatarUrl) {
+async function updateAvatarUrl(id, avatarUrl) {
   const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE users SET avatar_url = ?, updated_at = ? WHERE id = ?`
-  ).run(avatarUrl, now, id);
+  await qRun(
+    `UPDATE users SET avatar_url = ?, updated_at = ? WHERE id = ?`,
+    [avatarUrl, now, id]
+  );
   return findUserById(id);
 }
 
-function updateUserProfile(id, { displayName, avatarUrl }) {
+async function updateUserProfile(id, { displayName, avatarUrl }) {
   const now = new Date().toISOString();
-  const current = findUserById(id);
+  const current = await findUserById(id);
   if (!current) return null;
   const nextName =
     typeof displayName === 'string' && displayName.trim()
@@ -349,9 +392,10 @@ function updateUserProfile(id, { displayName, avatarUrl }) {
       : current.displayName;
   const nextAvatar =
     avatarUrl === undefined ? current.avatarUrl : avatarUrl;
-  db.prepare(
-    `UPDATE users SET display_name = ?, avatar_url = ?, updated_at = ? WHERE id = ?`
-  ).run(nextName, nextAvatar, now, id);
+  await qRun(
+    `UPDATE users SET display_name = ?, avatar_url = ?, updated_at = ? WHERE id = ?`,
+    [nextName, nextAvatar, now, id]
+  );
   return findUserById(id);
 }
 
@@ -373,34 +417,36 @@ function rowToCard(row) {
   };
 }
 
-function listCardsByUser(userId) {
-  const rows = db
-    .prepare(
-      `SELECT * FROM cards WHERE user_id = ? ORDER BY is_primary DESC, updated_at DESC`
-    )
-    .all(userId);
+async function listCardsByUser(userId, conn = pool) {
+  const rows = await q(
+    `SELECT * FROM cards WHERE user_id = ? ORDER BY is_primary DESC, updated_at DESC`,
+    [userId],
+    conn
+  );
   return rows.map(rowToCard);
 }
 
-function findCardById(id) {
-  const row = db.prepare('SELECT * FROM cards WHERE id = ?').get(id);
+async function findCardById(id, conn = pool) {
+  const row = await qOne('SELECT * FROM cards WHERE id = ?', [id], conn);
   return rowToCard(row);
 }
 
-function findCardForUser(id, userId) {
-  const row = db
-    .prepare('SELECT * FROM cards WHERE id = ? AND user_id = ?')
-    .get(id, userId);
+async function findCardForUser(id, userId, conn = pool) {
+  const row = await qOne(
+    'SELECT * FROM cards WHERE id = ? AND user_id = ?',
+    [id, userId],
+    conn
+  );
   return rowToCard(row);
 }
 
-function clearPrimaryForUser(userId) {
-  db.prepare(`UPDATE cards SET is_primary = 0 WHERE user_id = ?`).run(userId);
+async function clearPrimaryForUser(userId, conn = pool) {
+  await qRun(`UPDATE cards SET is_primary = 0 WHERE user_id = ?`, [userId], conn);
 }
 
-function upsertCard({ id, userId, data, isPrimary }) {
+async function upsertCard({ id, userId, data, isPrimary }, conn = pool) {
   const now = new Date().toISOString();
-  const existing = findCardForUser(id, userId);
+  const existing = await findCardForUser(id, userId, conn);
   const payload = JSON.stringify(data ?? {});
 
   let nextPrimary;
@@ -409,29 +455,34 @@ function upsertCard({ id, userId, data, isPrimary }) {
   } else if (existing) {
     nextPrimary = existing.isPrimary ? 1 : 0;
   } else {
-    // İlk kart otomatik primary
-    const count = db
-      .prepare('SELECT COUNT(*) AS c FROM cards WHERE user_id = ?')
-      .get(userId).c;
-    nextPrimary = count === 0 ? 1 : 0;
+    const countRow = await qOne(
+      'SELECT COUNT(*) AS c FROM cards WHERE user_id = ?',
+      [userId],
+      conn
+    );
+    nextPrimary = (countRow?.c || 0) === 0 ? 1 : 0;
   }
 
   if (nextPrimary === 1) {
-    clearPrimaryForUser(userId);
+    await clearPrimaryForUser(userId, conn);
   }
 
   if (existing) {
-    db.prepare(
-      `UPDATE cards SET payload = ?, is_primary = ?, updated_at = ? WHERE id = ? AND user_id = ?`
-    ).run(payload, nextPrimary, now, id, userId);
+    await qRun(
+      `UPDATE cards SET payload = ?, is_primary = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+      [payload, nextPrimary, now, id, userId],
+      conn
+    );
   } else {
-    db.prepare(
+    await qRun(
       `INSERT INTO cards (id, user_id, payload, is_primary, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(id, userId, payload, nextPrimary, now, now);
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, userId, payload, nextPrimary, now, now],
+      conn
+    );
   }
 
-  return findCardForUser(id, userId);
+  return findCardForUser(id, userId, conn);
 }
 
 /**
@@ -440,73 +491,82 @@ function upsertCard({ id, userId, data, isPrimary }) {
  * - Kart yoksa bakiye yetersizse oluşturmaz.
  * @returns {{ ok: boolean, code?: string, card?: object, state?: object }}
  */
-function upsertCardWithCreationSpend({ id, userId, data, isPrimary }) {
-  ensureUserTokens(userId);
+async function upsertCardWithCreationSpend({ id, userId, data, isPrimary }) {
+  await ensureUserTokens(userId);
 
-  const tx = db.transaction(() => {
-    const existing = findCardForUser(id, userId);
+  const result = await withTx(async (conn) => {
+    const existing = await findCardForUser(id, userId, conn);
     if (!existing) {
-      const row = db
-        .prepare('SELECT balance FROM user_tokens WHERE user_id = ?')
-        .get(userId);
+      const row = await qOne(
+        'SELECT balance FROM user_tokens WHERE user_id = ?',
+        [userId],
+        conn
+      );
       const balance = row?.balance ?? 0;
       if (balance < CARD_CREATION_COST) {
         return { ok: false, code: 'INSUFFICIENT' };
       }
       const now = new Date().toISOString();
-      db.prepare(
-        `UPDATE user_tokens SET balance = balance - ?, updated_at = ? WHERE user_id = ?`
-      ).run(CARD_CREATION_COST, now, userId);
+      await qRun(
+        `UPDATE user_tokens SET balance = balance - ?, updated_at = ? WHERE user_id = ?`,
+        [CARD_CREATION_COST, now, userId],
+        conn
+      );
     }
-    const card = upsertCard({ id, userId, data, isPrimary });
+    const card = await upsertCard({ id, userId, data, isPrimary }, conn);
     return { ok: true, card };
   });
 
-  const result = tx();
   if (!result.ok) {
     return {
       ok: false,
       code: result.code,
-      state: getTokensState(userId),
+      state: await getTokensState(userId),
     };
   }
   return {
     ok: true,
     card: result.card,
-    state: getTokensState(userId),
+    state: await getTokensState(userId),
   };
 }
 
-function deleteCard(id, userId) {
-  const result = db
-    .prepare(`DELETE FROM cards WHERE id = ? AND user_id = ?`)
-    .run(id, userId);
+async function deleteCard(id, userId) {
+  const result = await qRun(
+    `DELETE FROM cards WHERE id = ? AND user_id = ?`,
+    [id, userId]
+  );
   return result.changes > 0;
 }
 
-function setPrimaryCard(id, userId) {
-  const card = findCardForUser(id, userId);
+async function setPrimaryCard(id, userId) {
+  const card = await findCardForUser(id, userId);
   if (!card) return null;
-  clearPrimaryForUser(userId);
+  await clearPrimaryForUser(userId);
   const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE cards SET is_primary = 1, updated_at = ? WHERE id = ? AND user_id = ?`
-  ).run(now, id, userId);
+  await qRun(
+    `UPDATE cards SET is_primary = 1, updated_at = ? WHERE id = ? AND user_id = ?`,
+    [now, id, userId]
+  );
   return findCardForUser(id, userId);
 }
 
-function ensureUserPreferences(userId) {
-  const existing = db
-    .prepare('SELECT user_id FROM user_preferences WHERE user_id = ?')
-    .get(userId);
+async function ensureUserPreferences(userId, conn = pool) {
+  const existing = await qOne(
+    'SELECT user_id FROM user_preferences WHERE user_id = ?',
+    [userId],
+    conn
+  );
   if (existing) return;
   const now = new Date().toISOString();
-  db.prepare(
+  await qRun(
     `INSERT INTO user_preferences
       (user_id, notifications_enabled, language_code, premium_active,
        onboarding_completed, card_style, updated_at)
-     VALUES (?, 0, 'tr', 0, 0, NULL, ?)`
-  ).run(userId, now);
+     VALUES (?, 0, 'tr', 0, 0, NULL, ?)`,
+    [userId, now],
+    conn
+  );
 }
 
 function _normalizeCardStyle(value) {
@@ -515,15 +575,15 @@ function _normalizeCardStyle(value) {
   return SUPPORTED_CARD_STYLES.has(id) ? id : null;
 }
 
-function getUserPreferences(userId) {
-  ensureUserPreferences(userId);
-  const row = db
-    .prepare(
-      `SELECT notifications_enabled, language_code, premium_active,
-              onboarding_completed, card_style, updated_at
-       FROM user_preferences WHERE user_id = ?`
-    )
-    .get(userId);
+async function getUserPreferences(userId, conn = pool) {
+  await ensureUserPreferences(userId, conn);
+  const row = await qOne(
+    `SELECT notifications_enabled, language_code, premium_active,
+            onboarding_completed, card_style, updated_at
+     FROM user_preferences WHERE user_id = ?`,
+    [userId],
+    conn
+  );
   const lang =
     typeof row?.language_code === 'string' && row.language_code.trim()
       ? row.language_code.trim()
@@ -538,7 +598,7 @@ function getUserPreferences(userId) {
   };
 }
 
-function updateUserPreferences(
+async function updateUserPreferences(
   userId,
   {
     notificationsEnabled,
@@ -548,9 +608,9 @@ function updateUserPreferences(
     cardStyle,
   } = {}
 ) {
-  ensureUserPreferences(userId);
+  await ensureUserPreferences(userId);
   const now = new Date().toISOString();
-  const current = getUserPreferences(userId);
+  const current = await getUserPreferences(userId);
 
   const nextNotifications =
     typeof notificationsEnabled === 'boolean'
@@ -576,7 +636,7 @@ function updateUserPreferences(
       ? current.cardStyle
       : _normalizeCardStyle(cardStyle);
 
-  db.prepare(
+  await qRun(
     `UPDATE user_preferences
      SET notifications_enabled = ?,
          language_code = ?,
@@ -584,15 +644,16 @@ function updateUserPreferences(
          onboarding_completed = ?,
          card_style = ?,
          updated_at = ?
-     WHERE user_id = ?`
-  ).run(
-    nextNotifications ? 1 : 0,
-    nextLanguage,
-    nextPremium ? 1 : 0,
-    nextOnboarding ? 1 : 0,
-    nextStyle,
-    now,
-    userId
+     WHERE user_id = ?`,
+    [
+      nextNotifications ? 1 : 0,
+      nextLanguage,
+      nextPremium ? 1 : 0,
+      nextOnboarding ? 1 : 0,
+      nextStyle,
+      now,
+      userId,
+    ]
   );
   return getUserPreferences(userId);
 }
@@ -612,10 +673,11 @@ function _generateInviteCode() {
   return out;
 }
 
-function getOrCreateInvite(userId) {
-  const existing = db
-    .prepare(`SELECT user_id, code, created_at FROM user_invites WHERE user_id = ?`)
-    .get(userId);
+async function getOrCreateInvite(userId) {
+  const existing = await qOne(
+    `SELECT user_id, code, created_at FROM user_invites WHERE user_id = ?`,
+    [userId]
+  );
   if (existing) {
     return {
       code: existing.code,
@@ -628,28 +690,33 @@ function getOrCreateInvite(userId) {
   for (let attempt = 0; attempt < 8; attempt++) {
     const code = _generateInviteCode();
     try {
-      db.prepare(
-        `INSERT INTO user_invites (user_id, code, created_at) VALUES (?, ?, ?)`
-      ).run(userId, code, now);
+      await qRun(
+        `INSERT INTO user_invites (user_id, code, created_at) VALUES (?, ?, ?)`,
+        [userId, code, now]
+      );
       return {
         code,
         sharePath: `cardikoapp/invite/${code}`,
         createdAt: now,
       };
-    } catch {
-      // unique collision — retry
+    } catch (err) {
+      if (err && (err.errno === 1062 || err.code === 'ER_DUP_ENTRY')) {
+        continue;
+      }
+      throw err;
     }
   }
   throw new Error('Failed to allocate invite code');
 }
 
-function findInviteByCode(code) {
+async function findInviteByCode(code) {
   if (!code || typeof code !== 'string') return null;
   const normalized = code.trim().toUpperCase();
   if (!normalized) return null;
-  const row = db
-    .prepare(`SELECT user_id, code, created_at FROM user_invites WHERE code = ?`)
-    .get(normalized);
+  const row = await qOne(
+    `SELECT user_id, code, created_at FROM user_invites WHERE code = ?`,
+    [normalized]
+  );
   if (!row) return null;
   return {
     userId: row.user_id,
@@ -662,30 +729,32 @@ function findInviteByCode(code) {
  * Davet kodu kullan. Ödül: INVITE_REDEEM_REWARD token (redeemer'a).
  * @returns {{ ok: true, reward: number, state } | { ok: false, code: string }}
  */
-function redeemInviteCode(redeemerId, rawCode) {
-  const invite = findInviteByCode(rawCode);
+async function redeemInviteCode(redeemerId, rawCode) {
+  const invite = await findInviteByCode(rawCode);
   if (!invite) {
     return { ok: false, code: 'NOT_FOUND' };
   }
   if (invite.userId === redeemerId) {
     return { ok: false, code: 'OWN_CODE' };
   }
-  const already = db
-    .prepare(`SELECT redeemer_id FROM invite_redemptions WHERE redeemer_id = ?`)
-    .get(redeemerId);
+  const already = await qOne(
+    `SELECT redeemer_id FROM invite_redemptions WHERE redeemer_id = ?`,
+    [redeemerId]
+  );
   if (already) {
     return { ok: false, code: 'ALREADY_REDEEMED' };
   }
 
   const now = new Date().toISOString();
-  const tx = db.transaction(() => {
-    db.prepare(
+  const state = await withTx(async (conn) => {
+    await qRun(
       `INSERT INTO invite_redemptions (redeemer_id, code, inviter_id, created_at)
-       VALUES (?, ?, ?, ?)`
-    ).run(redeemerId, invite.code, invite.userId, now);
-    return creditTokens(redeemerId, INVITE_REDEEM_REWARD);
+       VALUES (?, ?, ?, ?)`,
+      [redeemerId, invite.code, invite.userId, now],
+      conn
+    );
+    return creditTokens(redeemerId, INVITE_REDEEM_REWARD, conn);
   });
-  const state = tx();
   return { ok: true, reward: INVITE_REDEEM_REWARD, state };
 }
 
@@ -710,31 +779,33 @@ function rowToAiChat(row) {
   };
 }
 
-function listAiChatsByUser(userId) {
-  const rows = db
-    .prepare(
-      `SELECT * FROM ai_chats WHERE user_id = ? ORDER BY updated_at DESC`
-    )
-    .all(userId);
+async function listAiChatsByUser(userId) {
+  const rows = await q(
+    `SELECT * FROM ai_chats WHERE user_id = ? ORDER BY updated_at DESC`,
+    [userId]
+  );
   return rows.map(rowToAiChat);
 }
 
-function findAiChatForUser(id, userId) {
-  const row = db
-    .prepare(`SELECT * FROM ai_chats WHERE id = ? AND user_id = ?`)
-    .get(id, userId);
+async function findAiChatForUser(id, userId, conn = pool) {
+  const row = await qOne(
+    `SELECT * FROM ai_chats WHERE id = ? AND user_id = ?`,
+    [id, userId],
+    conn
+  );
   return rowToAiChat(row);
 }
 
-function findAiChatByShareToken(token) {
+async function findAiChatByShareToken(token) {
   if (!token) return null;
-  const row = db
-    .prepare(`SELECT * FROM ai_chats WHERE share_token = ?`)
-    .get(token);
+  const row = await qOne(
+    `SELECT * FROM ai_chats WHERE share_token = ?`,
+    [token]
+  );
   return rowToAiChat(row);
 }
 
-function upsertAiChat({
+async function upsertAiChat({
   id,
   userId,
   title,
@@ -742,7 +813,7 @@ function upsertAiChat({
   thumbnailAsset,
 }) {
   const now = new Date().toISOString();
-  const existing = findAiChatForUser(id, userId);
+  const existing = await findAiChatForUser(id, userId);
   const safeTitle =
     typeof title === 'string' ? title.trim().slice(0, 80) : existing?.title || '';
   const safeMessages = Array.isArray(messages)
@@ -755,101 +826,112 @@ function upsertAiChat({
       : existing?.thumbnailAsset || null;
 
   if (existing) {
-    db.prepare(
+    await qRun(
       `UPDATE ai_chats
        SET title = ?, messages = ?, thumbnail_asset = ?, updated_at = ?
-       WHERE id = ? AND user_id = ?`
-    ).run(safeTitle, payload, thumb, now, id, userId);
+       WHERE id = ? AND user_id = ?`,
+      [safeTitle, payload, thumb, now, id, userId]
+    );
   } else {
-    db.prepare(
+    await qRun(
       `INSERT INTO ai_chats
         (id, user_id, title, thumbnail_asset, messages, share_token, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`
-    ).run(id, userId, safeTitle, thumb, payload, now, now);
+       VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+      [id, userId, safeTitle, thumb, payload, now, now]
+    );
   }
   return findAiChatForUser(id, userId);
 }
 
-function renameAiChat(id, userId, title) {
-  const existing = findAiChatForUser(id, userId);
+async function renameAiChat(id, userId, title) {
+  const existing = await findAiChatForUser(id, userId);
   if (!existing) return null;
   const safeTitle = String(title || '')
     .trim()
     .slice(0, 80);
   if (!safeTitle) return null;
   const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE ai_chats SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?`
-  ).run(safeTitle, now, id, userId);
+  await qRun(
+    `UPDATE ai_chats SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+    [safeTitle, now, id, userId]
+  );
   return findAiChatForUser(id, userId);
 }
 
-function deleteAiChat(id, userId) {
-  const result = db
-    .prepare(`DELETE FROM ai_chats WHERE id = ? AND user_id = ?`)
-    .run(id, userId);
+async function deleteAiChat(id, userId) {
+  const result = await qRun(
+    `DELETE FROM ai_chats WHERE id = ? AND user_id = ?`,
+    [id, userId]
+  );
   return result.changes > 0;
 }
 
-function ensureAiChatShareToken(id, userId) {
-  const existing = findAiChatForUser(id, userId);
+async function ensureAiChatShareToken(id, userId) {
+  const existing = await findAiChatForUser(id, userId);
   if (!existing) return null;
   if (existing.shareToken) return existing;
   const { randomBytes } = require('crypto');
   const token = randomBytes(12).toString('hex');
   const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE ai_chats SET share_token = ?, updated_at = ? WHERE id = ? AND user_id = ?`
-  ).run(token, now, id, userId);
+  await qRun(
+    `UPDATE ai_chats SET share_token = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+    [token, now, id, userId]
+  );
   return findAiChatForUser(id, userId);
 }
 
-function clearAiChatShareToken(id, userId) {
-  const existing = findAiChatForUser(id, userId);
+async function clearAiChatShareToken(id, userId) {
+  const existing = await findAiChatForUser(id, userId);
   if (!existing) return null;
   const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE ai_chats SET share_token = NULL, updated_at = ? WHERE id = ? AND user_id = ?`
-  ).run(now, id, userId);
+  await qRun(
+    `UPDATE ai_chats SET share_token = NULL, updated_at = ? WHERE id = ? AND user_id = ?`,
+    [now, id, userId]
+  );
   return findAiChatForUser(id, userId);
 }
 
-function deleteUserAccount(userId, { reason, note } = {}) {
-  const user = findUserById(userId);
+async function deleteUserAccount(userId, { reason, note } = {}) {
+  const user = await findUserById(userId);
   if (!user) return false;
   const now = new Date().toISOString();
-  const tx = db.transaction(() => {
-    db.prepare(
+  await withTx(async (conn) => {
+    await qRun(
       `INSERT INTO account_deletion_feedback (user_id, reason, note, deleted_at)
-       VALUES (?, ?, ?, ?)`
-    ).run(
-      userId,
-      typeof reason === 'string' ? reason.slice(0, 120) : null,
-      typeof note === 'string' ? note.slice(0, 1000) : null,
-      now
+       VALUES (?, ?, ?, ?)`,
+      [
+        userId,
+        typeof reason === 'string' ? reason.slice(0, 120) : null,
+        typeof note === 'string' ? note.slice(0, 1000) : null,
+        now,
+      ],
+      conn
     );
-    db.prepare(`DELETE FROM cards WHERE user_id = ?`).run(userId);
-    db.prepare(`DELETE FROM ai_chats WHERE user_id = ?`).run(userId);
-    db.prepare(`DELETE FROM user_template_unlocks WHERE user_id = ?`).run(
-      userId
+    await qRun(`DELETE FROM cards WHERE user_id = ?`, [userId], conn);
+    await qRun(`DELETE FROM ai_chats WHERE user_id = ?`, [userId], conn);
+    await qRun(
+      `DELETE FROM user_template_unlocks WHERE user_id = ?`,
+      [userId],
+      conn
     );
-    db.prepare(`DELETE FROM user_tokens WHERE user_id = ?`).run(userId);
-    db.prepare(`DELETE FROM user_preferences WHERE user_id = ?`).run(userId);
-    db.prepare(`DELETE FROM user_invites WHERE user_id = ?`).run(userId);
-    db.prepare(`DELETE FROM invite_redemptions WHERE redeemer_id = ?`).run(
-      userId
+    await qRun(`DELETE FROM user_tokens WHERE user_id = ?`, [userId], conn);
+    await qRun(`DELETE FROM user_preferences WHERE user_id = ?`, [userId], conn);
+    await qRun(`DELETE FROM user_invites WHERE user_id = ?`, [userId], conn);
+    await qRun(
+      `DELETE FROM invite_redemptions WHERE redeemer_id = ?`,
+      [userId],
+      conn
     );
-    db.prepare(`DELETE FROM device_push_tokens WHERE user_id = ?`).run(userId);
-    db.prepare(`DELETE FROM user_notifications WHERE user_id = ?`).run(userId);
-    db.prepare(`DELETE FROM users WHERE id = ?`).run(userId);
+    await qRun(`DELETE FROM device_push_tokens WHERE user_id = ?`, [userId], conn);
+    await qRun(`DELETE FROM user_notifications WHERE user_id = ?`, [userId], conn);
+    await qRun(`DELETE FROM users WHERE id = ?`, [userId], conn);
   });
-  tx();
   return true;
 }
 
 const SUPPORTED_PUSH_PLATFORMS = new Set(['ios', 'android', 'web', 'unknown']);
 
-function upsertDevicePushToken(userId, { token, platform }) {
+async function upsertDevicePushToken(userId, { token, platform }) {
   const safeToken = String(token || '').trim();
   if (safeToken.length < 8 || safeToken.length > 512) {
     throw new Error('INVALID_TOKEN');
@@ -857,20 +939,23 @@ function upsertDevicePushToken(userId, { token, platform }) {
   let plat = String(platform || 'unknown').trim().toLowerCase();
   if (!SUPPORTED_PUSH_PLATFORMS.has(plat)) plat = 'unknown';
   const now = new Date().toISOString();
-  const existing = db
-    .prepare(`SELECT token FROM device_push_tokens WHERE token = ?`)
-    .get(safeToken);
+  const existing = await qOne(
+    `SELECT token FROM device_push_tokens WHERE token = ?`,
+    [safeToken]
+  );
   if (existing) {
-    db.prepare(
+    await qRun(
       `UPDATE device_push_tokens
        SET user_id = ?, platform = ?, updated_at = ?
-       WHERE token = ?`
-    ).run(userId, plat, now, safeToken);
+       WHERE token = ?`,
+      [userId, plat, now, safeToken]
+    );
   } else {
-    db.prepare(
+    await qRun(
       `INSERT INTO device_push_tokens (token, user_id, platform, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)`
-    ).run(safeToken, userId, plat, now, now);
+       VALUES (?, ?, ?, ?, ?)`,
+      [safeToken, userId, plat, now, now]
+    );
   }
   return {
     token: safeToken,
@@ -879,30 +964,28 @@ function upsertDevicePushToken(userId, { token, platform }) {
   };
 }
 
-function removeDevicePushToken(userId, token) {
+async function removeDevicePushToken(userId, token) {
   const safeToken = String(token || '').trim();
   if (!safeToken) return false;
-  const result = db
-    .prepare(
-      `DELETE FROM device_push_tokens WHERE token = ? AND user_id = ?`
-    )
-    .run(safeToken, userId);
+  const result = await qRun(
+    `DELETE FROM device_push_tokens WHERE token = ? AND user_id = ?`,
+    [safeToken, userId]
+  );
   return result.changes > 0;
 }
 
-function listDevicePushTokens(userId) {
-  return db
-    .prepare(
-      `SELECT token, platform, created_at, updated_at
-       FROM device_push_tokens WHERE user_id = ?`
-    )
-    .all(userId)
-    .map((row) => ({
-      token: row.token,
-      platform: row.platform,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
+async function listDevicePushTokens(userId) {
+  const rows = await q(
+    `SELECT token, platform, created_at, updated_at
+     FROM device_push_tokens WHERE user_id = ?`,
+    [userId]
+  );
+  return rows.map((row) => ({
+    token: row.token,
+    platform: row.platform,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
 }
 
 function rowToNotification(row) {
@@ -924,7 +1007,7 @@ function rowToNotification(row) {
   };
 }
 
-function createUserNotification(userId, { title, body, data } = {}) {
+async function createUserNotification(userId, { title, body, data } = {}) {
   const { randomUUID } = require('crypto');
   const safeTitle = String(title || '').trim().slice(0, 120);
   if (!safeTitle) throw new Error('TITLE_REQUIRED');
@@ -933,98 +1016,97 @@ function createUserNotification(userId, { title, body, data } = {}) {
     data && typeof data === 'object' && !Array.isArray(data) ? data : {};
   const id = randomUUID();
   const now = new Date().toISOString();
-  db.prepare(
+  await qRun(
     `INSERT INTO user_notifications
       (id, user_id, title, body, data, read_at, created_at)
-     VALUES (?, ?, ?, ?, ?, NULL, ?)`
-  ).run(id, userId, safeTitle, safeBody, JSON.stringify(payload), now);
+     VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+    [id, userId, safeTitle, safeBody, JSON.stringify(payload), now]
+  );
   return findUserNotification(id, userId);
 }
 
-function findUserNotification(id, userId) {
-  const row = db
-    .prepare(
-      `SELECT * FROM user_notifications WHERE id = ? AND user_id = ?`
-    )
-    .get(id, userId);
+async function findUserNotification(id, userId) {
+  const row = await qOne(
+    `SELECT * FROM user_notifications WHERE id = ? AND user_id = ?`,
+    [id, userId]
+  );
   return rowToNotification(row);
 }
 
-function listUserNotifications(userId, { limit = 30, before } = {}) {
+async function listUserNotifications(userId, { limit = 30, before } = {}) {
   const safeLimit = Math.min(Math.max(Number(limit) || 30, 1), 100);
   let rows;
   if (before && typeof before === 'string') {
-    rows = db
-      .prepare(
-        `SELECT * FROM user_notifications
-         WHERE user_id = ? AND created_at < ?
-         ORDER BY created_at DESC
-         LIMIT ?`
-      )
-      .all(userId, before, safeLimit);
+    rows = await q(
+      `SELECT * FROM user_notifications
+       WHERE user_id = ? AND created_at < ?
+       ORDER BY created_at DESC
+       LIMIT ${safeLimit}`,
+      [userId, before]
+    );
   } else {
-    rows = db
-      .prepare(
-        `SELECT * FROM user_notifications
-         WHERE user_id = ?
-         ORDER BY created_at DESC
-         LIMIT ?`
-      )
-      .all(userId, safeLimit);
+    rows = await q(
+      `SELECT * FROM user_notifications
+       WHERE user_id = ?
+       ORDER BY created_at DESC
+       LIMIT ${safeLimit}`,
+      [userId]
+    );
   }
   return rows.map(rowToNotification);
 }
 
-function countUnreadNotifications(userId) {
-  const row = db
-    .prepare(
-      `SELECT COUNT(*) AS c FROM user_notifications
-       WHERE user_id = ? AND read_at IS NULL`
-    )
-    .get(userId);
+async function countUnreadNotifications(userId) {
+  const row = await qOne(
+    `SELECT COUNT(*) AS c FROM user_notifications
+     WHERE user_id = ? AND read_at IS NULL`,
+    [userId]
+  );
   return row?.c || 0;
 }
 
-function markNotificationRead(id, userId) {
-  const existing = findUserNotification(id, userId);
+async function markNotificationRead(id, userId) {
+  const existing = await findUserNotification(id, userId);
   if (!existing) return null;
   if (existing.readAt) return existing;
   const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE user_notifications SET read_at = ? WHERE id = ? AND user_id = ?`
-  ).run(now, id, userId);
+  await qRun(
+    `UPDATE user_notifications SET read_at = ? WHERE id = ? AND user_id = ?`,
+    [now, id, userId]
+  );
   return findUserNotification(id, userId);
 }
 
-function markAllNotificationsRead(userId) {
+async function markAllNotificationsRead(userId) {
   const now = new Date().toISOString();
-  db.prepare(
+  await qRun(
     `UPDATE user_notifications
      SET read_at = ?
-     WHERE user_id = ? AND read_at IS NULL`
-  ).run(now, userId);
+     WHERE user_id = ? AND read_at IS NULL`,
+    [now, userId]
+  );
   return { unreadCount: 0 };
 }
 
-function hasProcessedRevenueCatEvent(eventId) {
+async function hasProcessedRevenueCatEvent(eventId) {
   const safe = String(eventId || '').trim();
   if (!safe) return false;
-  const row = db
-    .prepare(
-      `SELECT event_id FROM revenuecat_webhook_events WHERE event_id = ? LIMIT 1`
-    )
-    .get(safe);
+  const row = await qOne(
+    `SELECT event_id FROM revenuecat_webhook_events WHERE event_id = ? LIMIT 1`,
+    [safe]
+  );
   return Boolean(row);
 }
 
-function markRevenueCatEventProcessed(eventId) {
+async function markRevenueCatEventProcessed(eventId) {
   const safe = String(eventId || '').trim();
   if (!safe) return false;
   const now = new Date().toISOString();
-  db.prepare(
-    `INSERT OR IGNORE INTO revenuecat_webhook_events (event_id, created_at)
-     VALUES (?, ?)`
-  ).run(safe, now);
+  await qRun(
+    `INSERT IGNORE INTO revenuecat_webhook_events (event_id, created_at)
+     VALUES (?, ?)`,
+    [safe, now]
+  );
   return true;
 }
 
@@ -1033,52 +1115,55 @@ function markRevenueCatEventProcessed(eventId) {
  * eventId varsa duplicate event'leri atomik şekilde yutar.
  * @returns {{ ok: true, duplicate?: boolean }}
  */
-function applyRevenueCatEventToUser(
+async function applyRevenueCatEventToUser(
   userId,
   { eventId, premiumActive, tokenGrant } = {}
 ) {
   const safeEventId = String(eventId || '').trim();
 
-  const tx = db.transaction(() => {
+  return withTx(async (conn) => {
     if (safeEventId) {
       const now = new Date().toISOString();
-      const inserted = db
-        .prepare(
-          `INSERT OR IGNORE INTO revenuecat_webhook_events (event_id, created_at)
-           VALUES (?, ?)`
-        )
-        .run(safeEventId, now);
+      const inserted = await qRun(
+        `INSERT IGNORE INTO revenuecat_webhook_events (event_id, created_at)
+         VALUES (?, ?)`,
+        [safeEventId, now],
+        conn
+      );
       if ((inserted?.changes || 0) === 0) {
         return { ok: true, duplicate: true };
       }
     }
 
     if (typeof premiumActive === 'boolean') {
-      ensureUserPreferences(userId);
+      await ensureUserPreferences(userId, conn);
       const now = new Date().toISOString();
-      db.prepare(
+      await qRun(
         `UPDATE user_preferences
          SET premium_active = ?, updated_at = ?
-         WHERE user_id = ?`
-      ).run(premiumActive ? 1 : 0, now, userId);
+         WHERE user_id = ?`,
+        [premiumActive ? 1 : 0, now, userId],
+        conn
+      );
     }
 
     if (Number.isFinite(tokenGrant) && tokenGrant > 0) {
-      ensureUserTokens(userId);
+      await ensureUserTokens(userId, conn);
       const now = new Date().toISOString();
-      db.prepare(
-        `UPDATE user_tokens SET balance = balance + ?, updated_at = ? WHERE user_id = ?`
-      ).run(Math.floor(tokenGrant), now, userId);
+      await qRun(
+        `UPDATE user_tokens SET balance = balance + ?, updated_at = ? WHERE user_id = ?`,
+        [Math.floor(tokenGrant), now, userId],
+        conn
+      );
     }
 
     return { ok: true };
   });
-
-  return tx();
 }
 
 module.exports = {
-  db,
+  pool,
+  initDatabase,
   INITIAL_TOKEN_BALANCE,
   TEMPLATE_UNLOCK_COST,
   CARD_CREATION_COST,

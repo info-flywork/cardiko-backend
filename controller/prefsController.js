@@ -5,9 +5,9 @@ const {
   SUPPORTED_CARD_STYLES,
 } = require('../db');
 
-function getMePrefs(req, res) {
+async function getMePrefs(req, res) {
   try {
-    const prefs = getUserPreferences(req.user.id);
+    const prefs = await getUserPreferences(req.user.id);
     return res.status(200).json({ prefs });
   } catch (err) {
     console.error('[me/prefs GET]', err);
@@ -15,7 +15,7 @@ function getMePrefs(req, res) {
   }
 }
 
-function patchMePrefs(req, res) {
+async function patchMePrefs(req, res) {
   const body = req.body || {};
   const hasNotifications = typeof body.notificationsEnabled === 'boolean';
   const hasLanguage = typeof body.languageCode === 'string';
@@ -51,7 +51,7 @@ function patchMePrefs(req, res) {
   }
 
   try {
-    const prefs = updateUserPreferences(req.user.id, {
+    const prefs = await updateUserPreferences(req.user.id, {
       notificationsEnabled: hasNotifications
         ? body.notificationsEnabled
         : undefined,

@@ -239,13 +239,13 @@ function renderHtml(req, card) {
 </html>`;
 }
 
-function getPublicCard(req, res) {
+async function getPublicCard(req, res) {
   try {
     const id = decodeURIComponent(req.params.id || '').trim();
     if (!id) {
       return res.status(400).json({ message: 'Card id required' });
     }
-    const card = findCardById(id);
+    const card = await findCardById(id);
     if (!card) {
       if (wantsJson(req) || wantsVcard(req)) {
         return res.status(404).json({ message: 'Card not found' });
@@ -286,13 +286,13 @@ function sendVcard(res, card) {
   return res.status(200).send(vcf);
 }
 
-function getPublicVcard(req, res) {
+async function getPublicVcard(req, res) {
   try {
     const id = decodeURIComponent(req.params.id || '').trim();
     if (!id) {
       return res.status(400).json({ message: 'Card id required' });
     }
-    const card = findCardById(id);
+    const card = await findCardById(id);
     if (!card) {
       return res.status(404).json({ message: 'Card not found' });
     }

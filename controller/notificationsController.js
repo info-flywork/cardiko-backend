@@ -10,7 +10,7 @@ const {
 } = require('../db');
 const { notifyUser } = require('../services/pushService');
 
-function registerDevice(req, res) {
+async function registerDevice(req, res) {
   const body = req.body || {};
   const token = typeof body.token === 'string' ? body.token.trim() : '';
   const platform =
@@ -21,7 +21,7 @@ function registerDevice(req, res) {
   }
 
   try {
-    const device = upsertDevicePushToken(req.user.id, { token, platform });
+    const device = await upsertDevicePushToken(req.user.id, { token, platform });
     return res.status(200).json({ device });
   } catch (err) {
     if (err.message === 'INVALID_TOKEN') {
@@ -32,7 +32,7 @@ function registerDevice(req, res) {
   }
 }
 
-function unregisterDevice(req, res) {
+async function unregisterDevice(req, res) {
   const token =
     (typeof req.body?.token === 'string' && req.body.token.trim()) ||
     (typeof req.params?.token === 'string' && decodeURIComponent(req.params.token)) ||
@@ -41,7 +41,7 @@ function unregisterDevice(req, res) {
     return res.status(400).json({ message: 'token required' });
   }
   try {
-    const removed = removeDevicePushToken(req.user.id, token);
+    const removed = await removeDevicePushToken(req.user.id, token);
     return res.status(200).json({ removed });
   } catch (err) {
     console.error('[me/devices DELETE]', err);
@@ -49,9 +49,9 @@ function unregisterDevice(req, res) {
   }
 }
 
-function listDevices(req, res) {
+async function listDevices(req, res) {
   try {
-    const devices = listDevicePushTokens(req.user.id);
+    const devices = await listDevicePushTokens(req.user.id);
     return res.status(200).json({ devices });
   } catch (err) {
     console.error('[me/devices GET]', err);
@@ -59,15 +59,15 @@ function listDevices(req, res) {
   }
 }
 
-function listNotifications(req, res) {
+async function listNotifications(req, res) {
   try {
     const limit = req.query.limit;
     const before = req.query.before;
-    const notifications = listUserNotifications(req.user.id, {
+    const notifications = await listUserNotifications(req.user.id, {
       limit,
       before: typeof before === 'string' ? before : undefined,
     });
-    const unreadCount = countUnreadNotifications(req.user.id);
+    const unreadCount = await countUnreadNotifications(req.user.id);
     return res.status(200).json({ notifications, unreadCount });
   } catch (err) {
     console.error('[me/notifications GET]', err);
@@ -75,10 +75,10 @@ function listNotifications(req, res) {
   }
 }
 
-function unreadCount(req, res) {
+async function unreadCount(req, res) {
   try {
     return res.status(200).json({
-      unreadCount: countUnreadNotifications(req.user.id),
+      unreadCount: await countUnreadNotifications(req.user.id),
     });
   } catch (err) {
     console.error('[me/notifications/unread-count]', err);
@@ -86,15 +86,15 @@ function unreadCount(req, res) {
   }
 }
 
-function readOne(req, res) {
+async function readOne(req, res) {
   try {
-    const notification = markNotificationRead(req.params.id, req.user.id);
+    const notification = await markNotificationRead(req.params.id, req.user.id);
     if (!notification) {
       return res.status(404).json({ message: 'Notification not found' });
     }
     return res.status(200).json({
       notification,
-      unreadCount: countUnreadNotifications(req.user.id),
+      unreadCount: await countUnreadNotifications(req.user.id),
     });
   } catch (err) {
     console.error('[me/notifications/:id/read]', err);
@@ -102,9 +102,9 @@ function readOne(req, res) {
   }
 }
 
-function readAll(req, res) {
+async function readAll(req, res) {
   try {
-    const result = markAllNotificationsRead(req.user.id);
+    const result = await markAllNotificationsRead(req.user.id);
     return res.status(200).json(result);
   } catch (err) {
     console.error('[me/notifications/read-all]', err);
@@ -137,7 +137,7 @@ async function createTestNotification(req, res) {
       notification: result.notification,
       push: result.push,
       notificationsEnabled: result.notificationsEnabled,
-      unreadCount: countUnreadNotifications(req.user.id),
+      unreadCount: await countUnreadNotifications(req.user.id),
     });
   } catch (err) {
     if (err.message === 'TITLE_REQUIRED') {
@@ -148,9 +148,9 @@ async function createTestNotification(req, res) {
   }
 }
 
-function getOne(req, res) {
+async function getOne(req, res) {
   try {
-    const notification = findUserNotification(req.params.id, req.user.id);
+    const notification = await findUserNotification(req.params.id, req.user.id);
     if (!notification) {
       return res.status(404).json({ message: 'Notification not found' });
     }

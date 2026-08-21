@@ -79,7 +79,7 @@ function _isWebhookAuthorized(req) {
   return auth === `Bearer ${expected}` || auth === expected || token === expected;
 }
 
-function revenuecatWebhook(req, res) {
+async function revenuecatWebhook(req, res) {
   if (!_isWebhookAuthorized(req)) {
     return res.status(401).json({ message: 'Unauthorized' });
   }
@@ -95,7 +95,7 @@ function revenuecatWebhook(req, res) {
     return res.status(200).json({ ok: true, skipped: 'NO_APP_USER_ID' });
   }
 
-  const user = findUserById(appUserId);
+  const user = await findUserById(appUserId);
   if (!user) {
     return res.status(200).json({ ok: true, skipped: 'USER_NOT_FOUND' });
   }
@@ -105,7 +105,7 @@ function revenuecatWebhook(req, res) {
   try {
     const premiumActive = _isPremiumOnEvent(event);
     const tokenGrant = _tokenGrantForEvent(event);
-    const applied = applyRevenueCatEventToUser(user.id, {
+    const applied = await applyRevenueCatEventToUser(user.id, {
       eventId,
       premiumActive,
       tokenGrant,

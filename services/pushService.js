@@ -12,11 +12,11 @@ async function notifyUser(
   userId,
   { title, body, data, forceInbox = true } = {}
 ) {
-  const prefs = getUserPreferences(userId);
+  const prefs = await getUserPreferences(userId);
   let notification = null;
 
   if (forceInbox || prefs.notificationsEnabled) {
-    notification = createUserNotification(userId, { title, body, data });
+    notification = await createUserNotification(userId, { title, body, data });
   }
 
   let push = { attempted: false, sent: 0, skipped: 'disabled' };
@@ -35,7 +35,7 @@ async function notifyUser(
 }
 
 async function sendPushToUser(userId, { title, body, data } = {}) {
-  const devices = listDevicePushTokens(userId);
+  const devices = await listDevicePushTokens(userId);
   if (devices.length === 0) {
     return { attempted: false, sent: 0, skipped: 'no_devices' };
   }

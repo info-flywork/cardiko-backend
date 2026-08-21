@@ -4,9 +4,9 @@ const {
   INVITE_REDEEM_REWARD,
 } = require('../db');
 
-function getMeInvite(req, res) {
+async function getMeInvite(req, res) {
   try {
-    const invite = getOrCreateInvite(req.user.id);
+    const invite = await getOrCreateInvite(req.user.id);
     return res.status(200).json({ invite });
   } catch (err) {
     console.error('[me/invite GET]', err);
@@ -14,7 +14,7 @@ function getMeInvite(req, res) {
   }
 }
 
-function redeemMeInvite(req, res) {
+async function redeemMeInvite(req, res) {
   const code =
     typeof req.body?.code === 'string' ? req.body.code.trim() : '';
   if (!code) {
@@ -22,7 +22,7 @@ function redeemMeInvite(req, res) {
   }
 
   try {
-    const result = redeemInviteCode(req.user.id, code);
+    const result = await redeemInviteCode(req.user.id, code);
     if (!result.ok) {
       const messages = {
         NOT_FOUND: 'Invite code not found',

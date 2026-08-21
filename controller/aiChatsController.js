@@ -30,9 +30,9 @@ function toClientChat(chat, req) {
   return base;
 }
 
-function listChats(req, res) {
+async function listChats(req, res) {
   try {
-    const chats = listAiChatsByUser(req.user.id).map((c) =>
+    const chats = (await listAiChatsByUser(req.user.id)).map((c) =>
       toClientChat(c, req)
     );
     return res.status(200).json({ chats });
@@ -42,9 +42,9 @@ function listChats(req, res) {
   }
 }
 
-function getChat(req, res) {
+async function getChat(req, res) {
   try {
-    const chat = findAiChatForUser(req.params.id, req.user.id);
+    const chat = await findAiChatForUser(req.params.id, req.user.id);
     if (!chat) {
       return res.status(404).json({ message: 'Chat not found' });
     }
@@ -55,7 +55,7 @@ function getChat(req, res) {
   }
 }
 
-function upsertChat(req, res) {
+async function upsertChat(req, res) {
   try {
     const id = String(req.params.id || '').trim();
     if (!id) {
@@ -67,7 +67,7 @@ function upsertChat(req, res) {
     const thumbnailAsset =
       typeof body.thumbnailAsset === 'string' ? body.thumbnailAsset : null;
 
-    const chat = upsertAiChat({
+    const chat = await upsertAiChat({
       id,
       userId: req.user.id,
       title,
@@ -81,14 +81,14 @@ function upsertChat(req, res) {
   }
 }
 
-function renameChat(req, res) {
+async function renameChat(req, res) {
   try {
     const title =
       typeof req.body?.title === 'string' ? req.body.title.trim() : '';
     if (!title) {
       return res.status(400).json({ message: 'title required' });
     }
-    const chat = renameAiChat(req.params.id, req.user.id, title);
+    const chat = await renameAiChat(req.params.id, req.user.id, title);
     if (!chat) {
       return res.status(404).json({ message: 'Chat not found' });
     }
@@ -99,9 +99,9 @@ function renameChat(req, res) {
   }
 }
 
-function removeChat(req, res) {
+async function removeChat(req, res) {
   try {
-    const ok = deleteAiChat(req.params.id, req.user.id);
+    const ok = await deleteAiChat(req.params.id, req.user.id);
     if (!ok) {
       return res.status(404).json({ message: 'Chat not found' });
     }
@@ -112,7 +112,7 @@ function removeChat(req, res) {
   }
 }
 
-function shareChat(req, res) {
+async function shareChat(req, res) {
   try {
     // Önce body varsa kaydet (paylaşmadan önce sync).
     const body = req.body || {};
@@ -120,7 +120,7 @@ function shareChat(req, res) {
       typeof body.title === 'string' ||
       Array.isArray(body.messages)
     ) {
-      upsertAiChat({
+      await upsertAiChat({
         id: req.params.id,
         userId: req.user.id,
         title: typeof body.title === 'string' ? body.title : '',
@@ -132,11 +132,11 @@ function shareChat(req, res) {
       });
     }
 
-    let chat = findAiChatForUser(req.params.id, req.user.id);
+    let chat = await findAiChatForUser(req.params.id, req.user.id);
     if (!chat) {
       return res.status(404).json({ message: 'Chat not found' });
     }
-    chat = ensureAiChatShareToken(req.params.id, req.user.id);
+    chat = await ensureAiChatShareToken(req.params.id, req.user.id);
     const client = toClientChat(chat, req);
     return res.status(200).json({
       chat: client,
@@ -149,9 +149,9 @@ function shareChat(req, res) {
   }
 }
 
-function unshareChat(req, res) {
+async function unshareChat(req, res) {
   try {
-    const chat = clearAiChatShareToken(req.params.id, req.user.id);
+    const chat = await clearAiChatShareToken(req.params.id, req.user.id);
     if (!chat) {
       return res.status(404).json({ message: 'Chat not found' });
     }
@@ -241,13 +241,13 @@ function renderSharedMessageHtml(m) {
   return `<div class="msg ${m.type === 'user' ? 'user' : 'bot'}"><span>${who}${voiceBadge}</span>${image}${text ? `<p>${text}</p>` : ''}${audio}</div>`;
 }
 
-function getPublicSharedChat(req, res) {
+async function getPublicSharedChat(req, res) {
   try {
     const token = decodeURIComponent(req.params.token || '').trim();
     if (!token) {
       return res.status(400).json({ message: 'Share token required' });
     }
-    const chat = findAiChatByShareToken(token);
+    const chat = await findAiChatByShareToken(token);
     if (!chat) {
       if ((req.get('accept') || '').includes('application/json') ||
           req.query.format === 'json') {

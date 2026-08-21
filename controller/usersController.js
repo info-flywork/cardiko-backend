@@ -4,7 +4,7 @@ function me(req, res) {
   return res.status(200).json({ user: req.user });
 }
 
-function updateMe(req, res) {
+async function updateMe(req, res) {
   const body = req.body || {};
   const hasName = typeof body.displayName === 'string';
   const hasAvatar = Object.prototype.hasOwnProperty.call(body, 'avatarUrl');
@@ -30,7 +30,7 @@ function updateMe(req, res) {
   }
 
   try {
-    const user = updateUserProfile(req.user.id, {
+    const user = await updateUserProfile(req.user.id, {
       displayName: hasName ? body.displayName.trim() : undefined,
       avatarUrl: hasAvatar ? body.avatarUrl : undefined,
     });
@@ -41,14 +41,14 @@ function updateMe(req, res) {
   }
 }
 
-function deleteMe(req, res) {
+async function deleteMe(req, res) {
   const body = req.body || {};
   const reason =
     typeof body.reason === 'string' ? body.reason.trim() : undefined;
   const note = typeof body.note === 'string' ? body.note.trim() : undefined;
 
   try {
-    const ok = deleteUserAccount(req.user.id, { reason, note });
+    const ok = await deleteUserAccount(req.user.id, { reason, note });
     if (!ok) {
       return res.status(404).json({ message: 'User not found' });
     }

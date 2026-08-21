@@ -6,12 +6,12 @@ const {
 } = require('../db');
 
 /** Aggregate profil: user + prefs + tokens + invite + unread. */
-function getMe(req, res) {
+async function getMe(req, res) {
   try {
-    const prefs = getUserPreferences(req.user.id);
-    const tokens = getTokensState(req.user.id);
-    const invite = getOrCreateInvite(req.user.id);
-    const unreadNotificationCount = countUnreadNotifications(req.user.id);
+    const prefs = await getUserPreferences(req.user.id);
+    const tokens = await getTokensState(req.user.id);
+    const invite = await getOrCreateInvite(req.user.id);
+    const unreadNotificationCount = await countUnreadNotifications(req.user.id);
     return res.status(200).json({
       user: req.user,
       prefs,

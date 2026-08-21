@@ -23,7 +23,7 @@ function signToken(user) {
  * Aynı deviceId → aynı kullanıcı.
  * Yeni cihaz → Guest_xxxxxx isimli misafir.
  */
-function guest(req, res) {
+async function guest(req, res) {
   const deviceId =
     typeof req.body?.deviceId === 'string' ? req.body.deviceId.trim() : '';
 
@@ -34,17 +34,17 @@ function guest(req, res) {
   }
 
   try {
-    let user = findUserByDeviceId(deviceId);
+    let user = await findUserByDeviceId(deviceId);
     let created = false;
     if (!user) {
-      user = createUser({
+      user = await createUser({
         id: randomUUID(),
         deviceId,
         displayName: randomGuestName(),
       });
       created = true;
     } else {
-      ensureUserTokens(user.id);
+      await ensureUserTokens(user.id);
     }
 
     const token = signToken(user);
