@@ -44,7 +44,16 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
+
+app.use((req, res, next) => {
+  const sendJson = res.json.bind(res);
+  res.json = (body) => {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    return sendJson(body);
+  };
+  next();
+});
 
 app.get('/', (req, res) => {
   res.status(200).json({

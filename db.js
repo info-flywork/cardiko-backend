@@ -10,6 +10,7 @@ const pool = mysql.createPool({
   connectionLimit: Number(process.env.DB_POOL_SIZE || 10),
   namedPlaceholders: false,
   timezone: 'Z',
+  charset: 'utf8mb4',
 });
 
 async function q(sql, params = [], conn = pool) {
@@ -154,6 +155,28 @@ async function initDatabase() {
 
   for (const sql of statements) {
     await pool.query(sql);
+  }
+
+  await pool.query(
+    'SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci'
+  );
+
+  const utf8Tables = [
+    'users',
+    'cards',
+    'user_preferences',
+    'user_notifications',
+    'ai_chats',
+    'account_deletion_feedback',
+  ];
+  for (const table of utf8Tables) {
+    try {
+      await pool.query(
+        `ALTER TABLE \`${table}\` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
+      );
+    } catch (err) {
+      console.warn(`[db] utf8mb4 convert skipped for ${table}:`, err.message);
+    }
   }
 
   await ensureColumn('users', 'avatar_url', 'TEXT NULL');
