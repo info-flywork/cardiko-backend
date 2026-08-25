@@ -157,10 +157,10 @@ async function initDatabase() {
     await pool.query(sql);
   }
 
-  await pool.query(
-    'SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci'
-  );
+  await pool.query('SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci');
 
+  // Sadece latin1/ascii kalan tabloları çevir — her açılışta CONVERT
+  // mevcut UTF-8 veriyi bozabilir.
   const utf8Tables = [
     'users',
     'cards',
@@ -171,9 +171,18 @@ async function initDatabase() {
   ];
   for (const table of utf8Tables) {
     try {
+      const rows = await q(
+        `SELECT TABLE_COLLATION AS c
+         FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`,
+        [process.env.DB_NAME, table]
+      );
+      const collation = String(rows[0]?.c || '');
+      if (collation.toLowerCase().includes('utf8mb4')) continue;
       await pool.query(
         `ALTER TABLE \`${table}\` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
       );
+      console.log(`[db] ${table} → utf8mb4 (was ${collation || 'unknown'})`);
     } catch (err) {
       console.warn(`[db] utf8mb4 convert skipped for ${table}:`, err.message);
     }
